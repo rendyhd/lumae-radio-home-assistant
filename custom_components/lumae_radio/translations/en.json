@@ -1,0 +1,157 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add a Lumae Radio",
+        "description": "Home Assistant usually finds a radio on your network by itself. To add one by hand, enter its web address: in the Lumae app, open the radio's remote and tap ⋯ → The radio; the address is under its name.",
+        "data": {
+          "address": "Web address"
+        },
+        "data_description": {
+          "address": "For example https://lumae-radio.local:8443. Use the name the radio was set up with: it doesn't answer to other names."
+        }
+      },
+      "api_key": {
+        "title": "{name}",
+        "description": "Home Assistant found the radio at {web_address}. Its identity is {identity} ({fingerprint}); the Lumae app shows the same under the radio's Access page.\n\nMake an API key for Home Assistant: in the Lumae app open the radio's remote, tap ⋯ → The radio → Access → + New key, or use API access on the radio's web page. Tick **Read** and **Control playback**. Tick **Stations** too if you want to favor, rest and ban tracks from Home Assistant.",
+        "data": {
+          "api_key": "API key"
+        },
+        "data_description": {
+          "api_key": "Starts with lrk. The radio shows it only once."
+        }
+      },
+      "reauth_confirm": {
+        "title": "New API key for {name}",
+        "description": "The radio no longer accepts the API key Home Assistant has: it was revoked, expired, or lost a scope it needs. Make a new key on the radio's Access page with **Read** and **Control playback** (and **Stations** for Favor, Rest and Ban).",
+        "data": {
+          "api_key": "API key"
+        }
+      },
+      "reconfigure": {
+        "title": "Change the radio's address or key",
+        "description": "Use this when the radio has a new web address. It must be the same radio: one set up again has a new identity and needs to be added again.",
+        "data": {
+          "address": "Web address",
+          "api_key": "API key"
+        }
+      }
+    },
+    "error": {
+      "invalid_address": "That isn't a web address. Try https://lumae-radio.local:8443.",
+      "cannot_connect": "Couldn't reach the radio. Check that it's on and on the same network as Home Assistant, then try again.",
+      "host_rejected": "The radio doesn't answer to this address. Use the web address it was set up with, like https://lumae-radio.local:8443.",
+      "not_adopted": "This radio has no owner yet. Set it up in the Lumae app first: Settings → Servers & accounts → Lumae Radio.",
+      "invalid_api_key": "The radio didn't accept this API key. Copy it again, or make a new one.",
+      "missing_read": "This API key can't read the radio. Make one with Read ticked.",
+      "missing_control": "This API key can't control playback. Make one with Read and Control playback ticked.",
+      "identity_changed": "The radio's identity changed since Home Assistant first saw it. If you set the radio up again, remove it here and add it again."
+    },
+    "abort": {
+      "already_configured": "This radio is already in Home Assistant.",
+      "not_lumae_radio": "This isn't a Lumae Radio Home Assistant can use.",
+      "cannot_connect": "Couldn't reach the radio. Check that it's on and on the same network as Home Assistant.",
+      "host_rejected": "The radio doesn't answer to the address it announced. Run its installer again.",
+      "not_adopted": "This radio has no owner yet. Set it up in the Lumae app first: Settings → Servers & accounts → Lumae Radio.",
+      "reauth_successful": "The radio accepts the new key.",
+      "reconfigure_successful": "The radio's details are saved.",
+      "wrong_radio": "That's a different radio, or this one was set up again. Add it as a new radio instead."
+    }
+  },
+  "entity": {
+    "media_player": {
+      "radio": {
+        "state_attributes": {
+          "radio_state": {
+            "name": "Radio state",
+            "state": {
+              "playing": "On air",
+              "paused": "Paused",
+              "stopped": "Stopped",
+              "buffering": "Starting",
+              "fault": "Needs attention"
+            }
+          },
+          "station_id": { "name": "Station ID" },
+          "station_mode": {
+            "name": "Energy",
+            "state": {
+              "daily": "Daily flow",
+              "steady": "Steady"
+            }
+          },
+          "track_id": { "name": "Track ID" }
+        }
+      }
+    }
+  },
+  "selector": {
+    "steer_choice": {
+      "options": {
+        "favor": "Favor",
+        "less": "Less",
+        "no_preference": "No preference",
+        "rest": "Rest",
+        "end_rest": "End rest",
+        "ban": "Ban",
+        "allow": "Allow again"
+      }
+    }
+  },
+  "services": {
+    "steer_track": {
+      "name": "Steer this track",
+      "description": "Favor, play less, rest or ban the track the radio is playing, on the station it plays it on. Your personal favorites, history and The Pulse stay as they are.",
+      "fields": {
+        "choice": {
+          "name": "Choice",
+          "description": "Favor and Less are gentle nudges. Rest keeps the track out for a while. Ban skips it now and never plays it on this station again."
+        },
+        "rest_days": {
+          "name": "Rest for",
+          "description": "How long a rest lasts. A week if left out."
+        },
+        "rest_until": {
+          "name": "Rest until",
+          "description": "When a rest ends, instead of a number of days."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "radio_unreachable": {
+      "message": "Couldn't reach the radio. It keeps playing on its own; Home Assistant tries again."
+    },
+    "api_key_rejected": {
+      "message": "The radio no longer accepts this API key. Add a new key in Home Assistant."
+    },
+    "api_key_lacks_control": {
+      "message": "This API key can't control playback. Make a key with Read and Control playback."
+    },
+    "api_key_lacks_scope": {
+      "message": "This API key can't do that. Make a key on the radio's Access page with the scopes it needs."
+    },
+    "identity_changed": {
+      "message": "The radio's identity changed. If you set the radio up again, remove it from Home Assistant and add it again."
+    },
+    "host_rejected": {
+      "message": "The radio doesn't answer to its saved address. Change the address in Home Assistant."
+    },
+    "radio_refused": {
+      "message": "{reason}"
+    },
+    "choose_station": {
+      "message": "Choose a station first: pick one as the source, or play one from Media."
+    },
+    "unknown_station": {
+      "message": "The radio has no station {station}."
+    },
+    "nothing_to_steer": {
+      "message": "Nothing is playing on a station right now, so there's no track to steer."
+    },
+    "steer_needs_stations_scope": {
+      "message": "This API key can't steer tracks. Make a key with Stations ticked, and add it in Home Assistant."
+    }
+  }
+}

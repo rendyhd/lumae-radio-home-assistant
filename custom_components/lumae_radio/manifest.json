@@ -1,0 +1,14 @@
+{
+  "domain": "lumae_radio",
+  "name": "Lumae Radio",
+  "codeowners": ["@rendyhd"],
+  "config_flow": true,
+  "dependencies": ["frontend", "http"],
+  "documentation": "https://github.com/rendyhd/lumae-radio-home-assistant",
+  "integration_type": "device",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/rendyhd/lumae-radio-home-assistant/issues",
+  "requirements": [],
+  "version": "0.1.0",
+  "zeroconf": ["_lumae-radio._tcp.local."]
+}

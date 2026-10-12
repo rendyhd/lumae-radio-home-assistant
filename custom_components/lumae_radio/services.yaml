@@ -1,0 +1,29 @@
+steer_track:
+  target:
+    entity:
+      integration: lumae_radio
+      domain: media_player
+  fields:
+    choice:
+      required: true
+      selector:
+        select:
+          translation_key: steer_choice
+          options:
+            - favor
+            - less
+            - no_preference
+            - rest
+            - end_rest
+            - ban
+            - allow
+    rest_days:
+      selector:
+        number:
+          min: 1
+          max: 365
+          step: 1
+          unit_of_measurement: days
+    rest_until:
+      selector:
+        datetime:
