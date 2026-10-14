@@ -344,10 +344,21 @@ class LumaeRadioClient:
                 content_type = response.content_type
                 if content_type not in IMAGE_TYPES:
                     raise RadioError("invalid-artwork")
-                body = await response.content.read(MAX_IMAGE_BYTES + 1)
-                if len(body) > MAX_IMAGE_BYTES:
+                announced = response.content_length
+                if announced is not None and announced > MAX_IMAGE_BYTES:
                     raise RadioError("invalid-artwork")
-                return body, content_type
+                # Read to the end: `content.read(n)` returns only what has arrived so far,
+                # which cut a large cover short.
+                chunks: list[bytes] = []
+                size = 0
+                async for chunk in response.content.iter_chunked(65536):
+                    size += len(chunk)
+                    if size > MAX_IMAGE_BYTES:
+                        raise RadioError("invalid-artwork")
+                    chunks.append(chunk)
+                if announced is not None and size != announced:
+                    raise RadioConnectionError("artwork-incomplete")
+                return b"".join(chunks), content_type
         except aiohttp.ServerFingerprintMismatch as err:
             raise RadioIdentityError("identity-changed") from err
         except (aiohttp.ClientError, TimeoutError) as err:

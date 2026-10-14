@@ -27,5 +27,8 @@ ATTR_CHOICE: Final = "choice"
 ATTR_REST_DAYS: Final = "rest_days"
 ATTR_REST_UNTIL: Final = "rest_until"
 
+# Part of each cover's address in Home Assistant; raise it when covers served before were wrong.
+ARTWORK_CACHE_VERSION: Final = 2
+
 MEDIA_TYPE_STATION: Final = "station"
 STATION_PREFIX: Final = "station:"

@@ -111,6 +111,12 @@ async def test_cover_comes_through_home_assistant(hass: HomeAssistant, setup) ->
     entity = hass.data[MP_DOMAIN].get_entity(ENTITY)
     body, content_type = await entity.async_get_media_image()
     assert content_type == "image/png" and body.startswith(b"\x89PNG")
+    assert body.endswith(b"IEND\xaeB`\x82")
+    assert (
+        hass.states.get(ENTITY)
+        .attributes["entity_picture"]
+        .endswith("&cache=trk-holocene.2")
+    )
 
 
 async def test_transport(hass: HomeAssistant, setup) -> None:

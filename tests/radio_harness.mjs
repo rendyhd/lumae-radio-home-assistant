@@ -301,9 +301,16 @@ const application = {
 };
 
 // ── Covers: a soft two-color field per track, as a real PNG ───────────────
+// Grained and 480 px, so a cover is a few hundred KB and arrives in many chunks, as a real
+// cover from the radio does.
 
 function cover(hue) {
-  const size = 240;
+  const size = 480;
+  let seed = hue * 7919 + 1;
+  const grain = () => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return (seed / 2147483648 - 0.5) * 24;
+  };
   const rgb = (h, s, l) => {
     const k = (n) => (n + h / 30) % 12;
     const a = s * Math.min(l, 1 - l);
@@ -323,7 +330,8 @@ function cover(hue) {
       const far = Math.hypot(u - bx, v - by);
       const t = Math.min(1, Math.max(0, near / (near + far)));
       const offset = y * (size * 3 + 1) + 1 + x * 3;
-      for (let c = 0; c < 3; c += 1) rows[offset + c] = Math.round(first[c] * (1 - t) + second[c] * t);
+      for (let c = 0; c < 3; c += 1)
+        rows[offset + c] = Math.min(255, Math.max(0, Math.round(first[c] * (1 - t) + second[c] * t + grain())));
     }
   }
   const crcTable = Array.from({ length: 256 }, (_, n) => {

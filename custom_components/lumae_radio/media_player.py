@@ -27,6 +27,7 @@ import voluptuous as vol
 from . import model
 from .api import RadioError
 from .const import (
+    ARTWORK_CACHE_VERSION,
     ATTR_CHOICE,
     ATTR_REST_DAYS,
     ATTR_REST_UNTIL,
@@ -165,6 +166,13 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
 
     @property
     def media_image_hash(self) -> str | None:
+        artwork = self._artwork_id
+        # Home Assistant's image proxy lets browsers keep a cover for an hour under this key;
+        # the suffix moves past covers 0.1.0 cut short.
+        return f"{artwork}.{ARTWORK_CACHE_VERSION}" if artwork else None
+
+    @property
+    def _artwork_id(self) -> str | None:
         artwork = (self._track or {}).get("artworkId")
         return artwork if isinstance(artwork, str) and artwork else None
 
@@ -207,7 +215,7 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         }
 
     async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
-        if (artwork := self.media_image_hash) is None:
+        if (artwork := self._artwork_id) is None:
             return None, None
         try:
             return await self.coordinator.client.artwork(artwork)

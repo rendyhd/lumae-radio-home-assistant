@@ -170,12 +170,14 @@ async def test_feedback_reads_the_station_revisions_first(
     assert reply.data["bans"][0]["trackId"] == "trk-holocene"
 
 
-async def test_artwork_is_an_image(
+async def test_artwork_arrives_whole(
     session: aiohttp.ClientSession, radio: Radio
 ) -> None:
     body, content_type = await client(session, radio).artwork("trk-holocene")
     assert content_type == "image/png"
-    assert body.startswith(b"\x89PNG")
+    # Large enough to come in many chunks, and complete: a PNG ends with its IEND chunk.
+    assert len(body) > 200_000
+    assert body.startswith(b"\x89PNG") and body.endswith(b"IEND\xaeB`\x82")
 
 
 async def test_events_arrive_as_the_radio_changes(
