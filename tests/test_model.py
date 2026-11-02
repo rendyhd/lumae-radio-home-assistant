@@ -131,3 +131,86 @@ def test_steer_choices_map_to_radio_actions() -> None:
 def test_refusals_never_show_a_code() -> None:
     assert model.refusal_text("station-not-found").startswith("This station is gone")
     assert "-" not in model.refusal_text("something-new")
+
+
+def on_air(features: list[str] | None = None, **list_fields) -> dict:
+    """A status with a list on air, from a radio with these `features`."""
+    value = status(station=None)
+    value["playback"]["list"] = {
+        "listId": "6c3a8a52-61a9-4f43-bb53-1d6a1c2d9a10",
+        "kind": "album",
+        "id": "al-1",
+        "name": "Kind of Blue",
+        "artist": "Miles Davis",
+        "index": 2,
+        "count": 5,
+        **list_fields,
+    }
+    if features is not None:
+        value["features"] = features
+    return value
+
+
+def test_a_list_on_air_only_from_a_radio_that_plays_lists() -> None:
+    assert model.plays_lists(on_air(["lists"]))
+    assert model.list_on_air(on_air(["lists"])) == {
+        "kind": "album",
+        "id": "al-1",
+        "name": "Kind of Blue",
+        "artist": "Miles Davis",
+        "index": 2,
+        "count": 5,
+        "shuffled": False,
+    }
+    assert model.list_place(model.list_on_air(on_air(["lists"]))) == "Album · 3 of 5"
+    assert model.list_on_air(on_air(["lists"], order="shuffle"))["shuffled"] is True
+    assert model.shuffles_lists(on_air(["lists", "list-shuffle"]))
+    assert not model.shuffles_lists(on_air(["lists"]))
+    # An older radio, or a list the integration can't show.
+    assert not model.plays_lists(on_air())
+    assert model.list_on_air(on_air()) is None
+    assert model.list_on_air(on_air(["lists"], kind="station")) is None
+    assert model.list_on_air(on_air(["lists"], index=5)) is None
+    assert model.list_on_air(on_air(["lists"], index=True)) is None
+    assert model.list_on_air(on_air(["lists"], name=""))["name"] == "Untitled album"
+    assert model.list_on_air(status()) is None
+
+
+def test_catalogue_pages_name_lists_and_never_show_an_id() -> None:
+    items, cursor = model.catalogue_page(
+        {
+            "items": [
+                {
+                    "kind": "album",
+                    "id": "al-1",
+                    "title": "Kind of Blue",
+                    "artist": "Miles Davis",
+                },
+                # The radio names an album without a name by its ID.
+                {"kind": "album", "id": "al-2", "title": "al-2", "artist": None},
+                {"kind": "playlist", "id": "pl-1", "title": "Elsewhere"},
+                {"kind": "album", "title": "No ID"},
+            ],
+            "nextCursor": "al-2",
+        },
+        "album",
+    )
+    assert [item["title"] for item in items] == ["Kind of Blue", "Untitled album"]
+    assert cursor == "al-2"
+    assert model.catalogue_title("album", items[0]) == "Kind of Blue · Miles Davis"
+    assert model.catalogue_title("album", items[1]) == "Untitled album"
+    assert model.catalogue_page({"items": [], "nextCursor": None}, "playlist") == (
+        [],
+        None,
+    )
+    assert model.catalogue_page(None, "collection") == ([], None)
+
+
+def test_list_refusals_say_what_the_radio_can_see() -> None:
+    assert model.refusal_text("album-not-found") == (
+        "The radio’s music server account doesn’t have this album."
+    )
+    assert "AudioMuse-AI user" in model.refusal_text("collection-not-found")
+    assert model.refusal_text("shuffle-unavailable").startswith(
+        "The radio can’t shuffle"
+    )

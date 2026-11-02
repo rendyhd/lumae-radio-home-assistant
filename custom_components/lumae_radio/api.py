@@ -22,7 +22,7 @@ import re
 import secrets
 import ssl
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import aiohttp
 
@@ -41,7 +41,10 @@ OPERATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 FEEDBACK_ACTIONS = frozenset(
     {"ban", "unban", "favour", "avoid", "neutral", "rest", "unrest"}
 )
-COMMANDS = frozenset({"play", "pause", "resume", "stop", "skip", "volume"})
+COMMANDS = frozenset(
+    {"play", "pause", "resume", "stop", "skip", "previous", "jump", "volume"}
+)
+CATALOGUE_KINDS = frozenset({"album", "playlist", "collection"})
 IMAGE_TYPES = frozenset({"image/jpeg", "image/png", "image/webp"})
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
@@ -320,6 +323,30 @@ class LumaeRadioClient:
             raise RadioError("unexpected-response")
         return reply
 
+    async def catalogue(
+        self,
+        kind: str,
+        query: str = "",
+        cursor: str | None = None,
+        limit: int = 64,
+    ) -> dict[str, Any]:
+        """A page of the radio's albums, playlists or collections (RL.11), by name.
+
+        Albums come from the radio's library; playlists from its music server account;
+        collections from AudioMuse-AI. `cursor` is the radio's own, from the page before.
+        """
+        if kind not in CATALOGUE_KINDS:
+            raise RadioError("invalid-search")
+        params = {"kind": kind, "limit": str(min(64, max(1, limit)))}
+        if text := query.strip()[:200]:
+            params["q"] = text
+        if cursor:
+            params["cursor"] = cursor[:512]
+        reply = await self._request("GET", f"/api/v1/catalogue?{urlencode(params)}")
+        if not isinstance(reply.data, dict):
+            raise RadioError("unexpected-response")
+        return reply.data
+
     async def operation(self, operation_id: str) -> dict[str, Any]:
         if not OPERATION_ID_PATTERN.match(operation_id):
             raise RadioError("operation-not-found")
@@ -389,7 +416,10 @@ class LumaeRadioClient:
     # ── Playback ─────────────────────────────────────────────────────────
 
     async def command(self, action: str, **payload: Any) -> str | None:
-        """Play, pause, resume, stop, skip or set the volume. Returns the operation ID."""
+        """Play (a station or a list), pause, resume, stop, skip, go back, jump or set the volume.
+
+        Returns the operation ID.
+        """
         if action not in COMMANDS:
             raise RadioError("invalid-command")
         body = {"action": action, **payload}

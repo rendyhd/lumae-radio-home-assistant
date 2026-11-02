@@ -11,6 +11,7 @@ import pytest
 from custom_components.lumae_radio.api import (
     LumaeRadioClient,
     RadioAuthError,
+    RadioError,
     RadioHostRejected,
     RadioIdentityError,
     RadioScopeError,
@@ -189,3 +190,27 @@ async def test_events_arrive_as_the_radio_changes(
     event = await asyncio.wait_for(anext(events), 5)
     assert event["type"] == "status"
     await events.aclose()
+
+
+async def test_reads_the_radios_lists_a_page_at_a_time(
+    session: aiohttp.ClientSession, radio: Radio
+) -> None:
+    radio.send("lists on")
+    radio_client = client(session, radio)
+    page = await radio_client.catalogue("album", limit=2)
+    assert [item["id"] for item in page["items"]] == ["al-000-blue", "al-001"]
+    after = await radio_client.catalogue("album", cursor=page["nextCursor"], limit=2)
+    assert [item["id"] for item in after["items"]] == ["al-002", "al-003"]
+    found = await radio_client.catalogue("playlist", "  rain  ")
+    assert [item["title"] for item in found["items"]] == ["Rainy days"]
+    with pytest.raises(RadioError) as err:
+        await radio_client.catalogue("track")
+    assert err.value.code == "invalid-search"
+    # A list plays by its kind and ID, with no station.
+    operation_id = await radio_client.command(
+        "play", list={"kind": "album", "id": "al-000-blue"}
+    )
+    finished = await radio_client.wait_operation(operation_id, timeout=5)
+    assert finished and finished["status"] == "completed"
+    playing = (await radio_client.status())["playback"]
+    assert (playing["stationId"], playing["list"]["name"]) == (None, "Kind of Blue")

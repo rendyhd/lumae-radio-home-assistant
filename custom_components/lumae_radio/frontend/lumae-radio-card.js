@@ -10,7 +10,7 @@
  * tested on their own (tests/card.test.mjs).
  */
 
-export const CARD_VERSION = '0.1.1';
+export const CARD_VERSION = '0.2.0';
 const DAY_MS = 86_400_000;
 export const WEEK_MS = 7 * DAY_MS;
 
@@ -45,6 +45,33 @@ export function mainAction(view) {
 export function stationLine(station, stationId) {
   if (!station) return stationId ? 'Stealth' : 'No station playing · Stealth';
   return `${station.name} · ${station.mode === 'steady' ? 'Steady' : 'Daily flow'} · Stealth`;
+}
+
+export const LIST_KIND_LABELS = { album: 'Album', playlist: 'Playlist', collection: 'Collection' };
+
+/**
+ * "Kind of Blue · Album · 3 of 12 · Stealth" while an album, playlist or collection plays
+ * instead of a station (RL.11), "· Shuffled" before Stealth when it plays shuffled (RL.6);
+ * `index` counts from 0.
+ */
+export function listLine(list) {
+  const shuffled = list.shuffled ? ' · Shuffled' : '';
+  return `${list.name} · ${LIST_KIND_LABELS[list.kind]} · ${list.index + 1} of ${list.count}${shuffled} · Stealth`;
+}
+
+/** The list on air from the entity's `list` attribute; null for a station or a bad value. */
+export function listOf(value) {
+  if (!value || typeof value !== 'object' || !LIST_KIND_LABELS[value.kind]) return null;
+  const { index, count } = value;
+  if (!Number.isInteger(index) || !Number.isInteger(count) || index < 0 || index >= count)
+    return null;
+  return {
+    kind: value.kind,
+    name: typeof value.name === 'string' && value.name ? value.name : 'Untitled',
+    index,
+    count,
+    shuffled: value.shuffled === true,
+  };
 }
 
 export function formatAgo(ms) {
@@ -165,7 +192,7 @@ export function faultText(code) {
   if (!code) return null;
   return (
     FAULTS[code] ??
-    'The radio ran into a problem. Press play to try again; if it stays, restart the radio.'
+    'The radio ran into a problem. If it keeps happening, restart the radio.'
   );
 }
 
@@ -369,6 +396,7 @@ export function viewOf(stateObj) {
     state: attributes.radio_state ?? null,
     stationId,
     station: stations.find((station) => station.id === stationId) ?? null,
+    list: listOf(attributes.list),
     stations,
     trackId: attributes.track_id ?? null,
     title: attributes.media_title ?? null,
@@ -402,6 +430,65 @@ export const VOLUME_SEND_MS = 250;
 export function volumeDue(value, sent, now) {
   if (!sent) return true;
   return Math.round(value * 100) !== Math.round(sent.value * 100) && now - sent.at >= VOLUME_SEND_MS;
+}
+
+// ── Fitting the height it has ─────────────────────────────────────────────
+
+export const LAYOUTS = ['auto', 'full', 'compact'];
+/** The smallest cover before the card goes compact, and the one the why line gives way for. */
+export const ART_MIN_PX = 120;
+export const WHY_ART_MIN_PX = 160;
+/** Room kept free under the card by default, for a bar along the bottom of the screen. */
+export const BOTTOM_OFFSET_PX = 72;
+
+/** The configured room under the card, in px. */
+export function bottomOffset(config) {
+  const value = Number(config?.bottom_offset);
+  return config?.bottom_offset !== undefined && config.bottom_offset !== null && value >= 0
+    ? value
+    : BOTTOM_OFFSET_PX;
+}
+
+/**
+ * The full card in `available` px: its cover (null: as large as the width allows) and whether the
+ * why line goes, or null when even the smallest cover doesn't fit. `full` is the full card as it
+ * lays out without a limit: its height, its cover's and the why line's with its margin (0 without
+ * one). The why line goes before the cover drops below 160 px.
+ */
+export function fitFull(available, full) {
+  const withWhy = available - (full.height - full.art);
+  if (withWhy >= full.art) return { art: null, tight: false };
+  if (!full.why || withWhy >= Math.min(WHY_ART_MIN_PX, full.art))
+    return withWhy >= ART_MIN_PX ? { art: Math.floor(withWhy), tight: false } : null;
+  const withoutWhy = withWhy + full.why;
+  if (withoutWhy >= full.art) return { art: null, tight: true };
+  return withoutWhy >= ART_MIN_PX ? { art: Math.floor(withoutWhy), tight: true } : null;
+}
+
+/**
+ * How `layout: auto` lays out the card. `space.box` is the height Home Assistant gave it (fixed
+ * rows); otherwise `space.below` runs from its top to the bottom of the screen, less the room kept
+ * free, and `space.screen` is the whole screen under the header, less that room. The card fits
+ * below its top: a smaller cover, then compact. A card that starts too far down for even the
+ * compact card is one you scroll to, so it fits the screen instead. `compactHeight()` measures the
+ * compact card; a compact fit says the room its cover may grow into (`available`).
+ */
+export function chooseFit(space, full, compactHeight) {
+  const compact = (available) => ({ compact: true, art: null, tight: false, available });
+  const asFull = (fit) => (fit ? { compact: false, ...fit } : null);
+  if (typeof space.box === 'number') return asFull(fitFull(space.box, full)) ?? compact(space.box);
+  const below = asFull(fitFull(space.below, full));
+  if (below) return below;
+  if (compactHeight() <= space.below) return compact(space.below);
+  return asFull(fitFull(space.screen, full)) ?? compact(space.screen);
+}
+
+/** The card's top in the page, as if nothing were scrolled: it stays put while you scroll. */
+function pageTop(element) {
+  let top = element.getBoundingClientRect().top;
+  for (let node = element; node; node = node.assignedSlot ?? node.parentNode ?? node.host ?? null)
+    if (node.nodeType === 1) top += node.scrollTop;
+  return top;
 }
 
 // ── Look ──────────────────────────────────────────────────────────────────
@@ -478,8 +565,11 @@ const GLYPH = {
 
 const STYLE = `
 :host { display: block; }
+:host([data-rows]) { height: 100%; }
 [hidden] { display: none !important; }
-ha-card { overflow: hidden; background: var(--lr-bg); color: var(--lr-text); border: 1px solid var(--lr-border); }
+ha-card { display: block; overflow: hidden; background: var(--lr-bg); color: var(--lr-text); border: 1px solid var(--lr-border); }
+:host([data-rows]) ha-card { height: 100%; box-sizing: border-box; }
+:host([data-rows]) .lr { height: 100%; }
 .lr { position: relative; container-type: inline-size; color: var(--lr-text); font-family: 'Lumae Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif; -webkit-font-smoothing: antialiased; }
 :host([data-theme=dark]) { ${vars(THEMES.dark)} --lr-cover-opacity: .72; }
 :host([data-theme=light]) { ${vars(THEMES.light)} --lr-cover-opacity: .35; }
@@ -503,7 +593,7 @@ header { display: flex; flex-direction: column; align-items: center; gap: 3px; p
 
 .banner { margin: 10px 24px 0; padding: 8px 16px; border-radius: 10px; background: color-mix(in srgb, var(--lr-surface) 82%, transparent); border: 1px solid var(--lr-border); font-size: 13px; line-height: 18px; color: var(--lr-text); }
 
-.art { align-self: center; margin-top: 14px; width: min(294px, calc(100cqw - 96px)); min-width: 140px; aspect-ratio: 1; border-radius: 4px; overflow: hidden; position: relative;
+.art { align-self: center; margin-top: 14px; width: min(294px, calc(100cqw - 96px), var(--lr-art-max, 294px)); min-width: min(140px, var(--lr-art-max, 140px)); aspect-ratio: 1; border-radius: 4px; overflow: hidden; position: relative;
   background: linear-gradient(135deg, var(--lr-surface2), var(--lr-surface), var(--lr-surfaceDim));
   box-shadow: 0 30px 35px -12px color-mix(in srgb, var(--lr-dominant) 55%, transparent); transition: box-shadow .6s ease; }
 .art img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -630,9 +720,55 @@ input[type=range]:focus-visible::-webkit-slider-thumb { outline: 2px solid var(-
 .pill.bad { background: var(--lr-danger); border-color: var(--lr-danger); color: #fff; }
 .message { padding: 24px; font-size: 14px; color: var(--lr-text2); }
 
+/* Short of height, the why line goes first (the sliders glyph still opens it). */
+.lr.tight .why { display: none; }
+
+/* Compact: the cover at the left, the title and the controls beside it. */
+.lr.compact .content { display: grid; grid-template-columns: auto minmax(0, 1fr); padding: 12px 0;
+  grid-template-areas: "head head" "banner banner" "art meta" "art transport" "progress progress" "volume volume" "chips chips" "note note"; }
+.lr.compact header { grid-area: head; align-items: flex-start; text-align: left; padding: 0 20px; }
+.lr.compact .banner { grid-area: banner; margin: 10px 20px 0; }
+/* Fitting the screen, the cover grows into the room it has, as long as the controls fit beside it. */
+.lr.compact .art { grid-area: art; align-self: start; margin: 10px 14px 0 20px; width: max(96px, min(var(--lr-art-max, 96px), calc(100cqw - 262px))); min-width: 0;
+  box-shadow: 0 12px 18px -8px color-mix(in srgb, var(--lr-dominant) 55%, transparent); }
+.lr.compact .meta { grid-area: meta; align-self: start; padding: 10px 20px 0 0; }
+.lr.compact .title { font-size: 19px; line-height: 1.15; letter-spacing: -0.3px; }
+.lr.compact .artist { margin-top: 3px; font-size: 13px; }
+.lr.compact .album, .lr.compact .why { display: none; }
+.lr.compact .prompt { margin-top: 3px; font-size: 13px; }
+.lr.compact .transport { grid-area: transport; align-self: end; padding: 6px 20px 0 0; }
+.lr.compact .transport .icon { width: 40px; height: 40px; }
+.lr.compact .primary { width: 48px; height: 48px; box-shadow: 0 6px 18px color-mix(in srgb, var(--lr-accent) 30%, transparent); }
+.lr.compact .primary > svg { width: 22px; height: 22px; }
+.lr.compact .spinner { width: 20px; height: 20px; }
+.lr.compact .progress { grid-area: progress; display: flex; align-items: center; gap: 10px; padding: 10px 20px 0; }
+.lr.compact .bar { flex: 1; }
+.lr.compact .times { display: contents; }
+.lr.compact .times span { min-width: 34px; }
+.lr.compact .elapsed { order: -1; }
+.lr.compact .left { text-align: right; }
+.lr.compact .volume { grid-area: volume; padding: 4px 20px 0; }
+.lr.compact input[type=range] { height: 28px; }
+.lr.compact .chips { grid-area: chips; padding: 8px 16px 0; }
+.lr.compact .chip { height: 28px; }
+.lr.compact .note { grid-area: note; justify-self: center; margin: 8px 20px 0; }
+
 @container (max-width: 380px) {
   .chips { padding: 12px 12px 0; gap: 6px; }
   .chip { padding: 0 10px; }
+}
+@container (max-width: 357px) {
+  .lr.compact .art { width: 72px; align-self: center; }
+  .lr.compact .transport .icon { width: 36px; height: 36px; }
+  .lr.compact .primary { width: 44px; height: 44px; }
+  .lr.compact .chips { padding: 8px 10px 0; gap: 4px; }
+  .lr.compact .chip { padding: 0 8px; }
+}
+@container (max-width: 313px) {
+  /* Too narrow for the controls beside the cover: they take their own row. */
+  .lr.compact .content { grid-template-areas: "head head" "banner banner" "art meta" "transport transport" "progress progress" "volume volume" "chips chips" "note note"; }
+  .lr.compact .meta { align-self: center; }
+  .lr.compact .transport { padding: 8px 20px 0; }
 }
 @container (max-width: 340px) {
   .meta, .progress, .transport, .volume { padding-left: 20px; padding-right: 20px; }
@@ -768,13 +904,21 @@ export class LumaeRadioCard extends Base {
     this._ticker = null;
     this._dominant = null;
     this._dominantFor = null;
+    this._fitFrame = 0;
+    this._fitKey = null;
+    this._compact = null;
+    this._resizeObserver = null;
+    this._onWindowResize = () => this._scheduleFit();
   }
 
   setConfig(config) {
     if (!config || typeof config.entity !== 'string' || !config.entity)
       throw new Error('Choose a Lumae Radio for this card.');
     this._config = { theme: 'auto', show_volume: true, show_steering: true, ...config };
+    if (!LAYOUTS.includes(this._config.layout)) this._config.layout = 'auto';
+    this._compact = null;
     this._render();
+    this._scheduleFit();
   }
 
   set hass(hass) {
@@ -789,8 +933,11 @@ export class LumaeRadioCard extends Base {
       this._render();
   }
 
+  /** Its height in Home Assistant's 50 px units, once it has one. */
   getCardSize() {
-    return 10;
+    const height = this.isConnected ? this.offsetHeight : 0;
+    if (height) return Math.ceil(height / 50);
+    return this._config?.layout === 'compact' ? 5 : 10;
   }
 
   getGridOptions() {
@@ -800,12 +947,20 @@ export class LumaeRadioCard extends Base {
   connectedCallback() {
     loadFonts();
     this._ticker = setInterval(() => this._tick(), 1000);
+    window.addEventListener('resize', this._onWindowResize);
     this._render();
+    this._observe();
+    this._scheduleFit();
   }
 
   disconnectedCallback() {
     clearInterval(this._ticker);
     this._ticker = null;
+    window.removeEventListener('resize', this._onWindowResize);
+    this._resizeObserver?.disconnect();
+    this._resizeObserver = null;
+    cancelAnimationFrame(this._fitFrame);
+    this._fitFrame = 0;
   }
 
   // ── Building ──────────────────────────────────────────────────────────
@@ -821,7 +976,9 @@ export class LumaeRadioCard extends Base {
     this._root.append(template.content.cloneNode(true));
     const $ = (selector) => this._root.querySelector(selector);
     this._el = {
+      card: $('ha-card'),
       lr: $('.lr'),
+      content: $('.content'),
       backdrop: $('.backdrop img'),
       shade: $('.backdrop .shade'),
       dot: $('.dot'),
@@ -905,6 +1062,94 @@ export class LumaeRadioCard extends Base {
         else this._closeSheets();
       }
     });
+    this._observe();
+  }
+
+  // ── Fitting the height it has ─────────────────────────────────────────
+
+  /** Fits again when the card or what it shows changes size (the content, for fixed rows). */
+  _observe() {
+    if (this._resizeObserver || !this._el || !this.isConnected || !globalThis.ResizeObserver) return;
+    this._resizeObserver = new ResizeObserver(() => this._scheduleFit());
+    this._resizeObserver.observe(this);
+    this._resizeObserver.observe(this._el.content);
+  }
+
+  /** One fit per frame, outside the observer's callback, so it never loops. */
+  _scheduleFit() {
+    if (this._fitFrame || !this._el || !this.isConnected) return;
+    this._fitFrame = requestAnimationFrame(() => {
+      this._fitFrame = 0;
+      this._fit();
+    });
+  }
+
+  /** The height of the rows Home Assistant fixed for the card in a sections view, or null. */
+  _fixedBox() {
+    const style = getComputedStyle(this);
+    const rows = parseFloat(style.getPropertyValue('--row-size'));
+    if (!(rows > 0)) return null;
+    const height = parseFloat(style.getPropertyValue('--row-height')) || 56;
+    const gap = parseFloat(style.getPropertyValue('--row-gap')) || 8;
+    return rows * (height + gap) - gap;
+  }
+
+  /** What the fit depends on besides the card's own size: its box, or its top and the screen. */
+  _fitSpace() {
+    const box = this._fixedBox();
+    if (box !== null) return { box };
+    const top = Math.round(pageTop(this));
+    const room = window.innerHeight - bottomOffset(this._config);
+    const header = parseFloat(getComputedStyle(this).getPropertyValue('--header-height')) || 56;
+    return { below: room - top, screen: room - Math.min(top, header) };
+  }
+
+  _fit() {
+    const el = this._el;
+    if (!el || !this.isConnected || !this._view) return;
+    const { lr } = el;
+    const layout = this._config.layout;
+    const space = this._fitSpace();
+    // Fixed rows: the card fills them, whatever its layout.
+    this.toggleAttribute('data-rows', typeof space.box === 'number');
+    // Measured as the full card, with the why line and no limit on the cover.
+    lr.classList.remove('compact', 'tight');
+    lr.style.removeProperty('--lr-art-max');
+    this._fitKey = JSON.stringify(space);
+    if (layout !== 'auto') {
+      lr.classList.toggle('compact', layout === 'compact');
+      return;
+    }
+    const host = this.getBoundingClientRect();
+    if (!host.width) return;
+    const frame = getComputedStyle(el.card);
+    const chrome = parseFloat(frame.borderTopWidth) + parseFloat(frame.borderBottomWidth);
+    const height = () => el.content.getBoundingClientRect().height + chrome;
+    const artHeight = () => el.art.getBoundingClientRect().height;
+    // Once compact, it stays compact while its room stays the same, so it doesn't switch back and
+    // forth as tracks start and stop.
+    const room = JSON.stringify([space, Math.round(host.width)]);
+    let fit;
+    if (this._compact?.room === room) fit = { compact: true, available: this._compact.available };
+    else {
+      const why = el.why.hidden
+        ? 0
+        : el.why.getBoundingClientRect().height + parseFloat(getComputedStyle(el.why).marginTop);
+      fit = chooseFit(space, { height: height(), art: artHeight(), why }, () => {
+        lr.classList.add('compact');
+        const compactHeight = height();
+        lr.classList.remove('compact');
+        return compactHeight;
+      });
+      this._compact = fit.compact ? { room, available: fit.available } : null;
+    }
+    if (fit.compact) {
+      lr.classList.add('compact');
+      lr.style.setProperty('--lr-art-max', `${Math.floor(fit.available - (height() - artHeight()))}px`);
+      return;
+    }
+    lr.classList.toggle('tight', fit.tight);
+    if (fit.art !== null) lr.style.setProperty('--lr-art-max', `${fit.art}px`);
   }
 
   // ── Rendering ─────────────────────────────────────────────────────────
@@ -955,7 +1200,9 @@ export class LumaeRadioCard extends Base {
     const label = remoteStateLabel(view.state, answering);
     el.kicker.textContent = `${view.name} · ${label}`;
     el.dot.className = `dot${answering && view.state === 'playing' ? ' on' : ''}${view.state === 'fault' && answering ? ' fault' : ''}`;
-    el.subline.textContent = stationLine(view.station, view.stationId);
+    el.subline.textContent = view.list
+      ? listLine(view.list)
+      : stationLine(view.station, view.stationId);
 
     const banner = healthBanner(view);
     el.banner.hidden = !banner;
@@ -1012,7 +1259,8 @@ export class LumaeRadioCard extends Base {
     el.primary.disabled = !answering;
     el.stop.disabled = !answering || view.state === 'stopped';
     el.next.disabled = !answering || !hasTrack || view.state === 'stopped';
-    el.steer.disabled = !hasTrack;
+    // A list has no station to steer on.
+    el.steer.disabled = !hasTrack || Boolean(view.list);
     el.stationsButton.disabled = !answering && view.stations.length === 0;
 
     // Volume.
@@ -1074,6 +1322,10 @@ export class LumaeRadioCard extends Base {
     if (this._note && now > this._note.until) {
       this._note = null;
       el.note.hidden = true;
+    }
+    // Cards above it that load late move it without resizing it; the screen can change too.
+    if (this._config.layout === 'auto' && this.isConnected && this.offsetWidth) {
+      if (JSON.stringify(this._fitSpace()) !== this._fitKey) this._scheduleFit();
     }
   }
 
@@ -1525,6 +1777,24 @@ const EDITOR_SCHEMA = [
       },
     },
   },
+  {
+    name: 'layout',
+    required: true,
+    selector: {
+      select: {
+        mode: 'dropdown',
+        options: [
+          { value: 'auto', label: 'Fit the screen' },
+          { value: 'full', label: 'Full' },
+          { value: 'compact', label: 'Compact' },
+        ],
+      },
+    },
+  },
+  {
+    name: 'bottom_offset',
+    selector: { number: { min: 0, max: 400, step: 1, mode: 'box', unit_of_measurement: 'px' } },
+  },
   { name: 'show_volume', selector: { boolean: {} } },
   { name: 'show_steering', selector: { boolean: {} } },
 ];
@@ -1532,13 +1802,21 @@ const EDITOR_SCHEMA = [
 const EDITOR_LABELS = {
   entity: 'Radio',
   theme: 'Look',
+  layout: 'Layout',
+  bottom_offset: 'Room kept free at the bottom',
   show_volume: 'Show volume',
   show_steering: 'Show Favor · Less · Rest · Ban',
 };
 
+const EDITOR_HELPERS = {
+  layout:
+    'Fit the screen keeps the whole card on screen: the cover gets smaller, and then the card turns compact.',
+  bottom_offset: `Keeps the controls clear of a bar along the bottom of the screen. Empty means ${BOTTOM_OFFSET_PX} px.`,
+};
+
 export class LumaeRadioCardEditor extends Base {
   setConfig(config) {
-    this._config = { theme: 'auto', show_volume: true, show_steering: true, ...config };
+    this._config = { theme: 'auto', layout: 'auto', show_volume: true, show_steering: true, ...config };
     this._render();
   }
 
@@ -1552,6 +1830,7 @@ export class LumaeRadioCardEditor extends Base {
     if (!this._form) {
       this._form = document.createElement('ha-form');
       this._form.computeLabel = (schema) => EDITOR_LABELS[schema.name] ?? schema.name;
+      this._form.computeHelper = (schema) => EDITOR_HELPERS[schema.name];
       this._form.addEventListener('value-changed', (event) => {
         this._config = event.detail.value;
         this.dispatchEvent(

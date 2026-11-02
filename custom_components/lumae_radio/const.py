@@ -32,3 +32,5 @@ ARTWORK_CACHE_VERSION: Final = 2
 
 MEDIA_TYPE_STATION: Final = "station"
 STATION_PREFIX: Final = "station:"
+# Albums, playlists and collections (RL.11): `album:<id>`, `playlist:<id>`, `collection:<id>`.
+MEDIA_TYPE_COLLECTION: Final = "collection"

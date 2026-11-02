@@ -4,11 +4,16 @@ import { test } from 'node:test';
 
 import {
   applyChange,
+  bottomOffset,
   chipChange,
+  chooseFit,
   chosenChip,
+  fitFull,
   formatAgo,
   formatClock,
   healthBanner,
+  listLine,
+  listOf,
   mainAction,
   mixColor,
   NOT_ANSWERING_BANNER,
@@ -183,4 +188,86 @@ test('a press shows ahead until the radio reports it', () => {
   const pause = { state: 'paused', settle: ['paused'], stationId: null };
   assert.equal(settled(pause, { state: 'playing', stationId: 's' }), false);
   assert.equal(settled(pause, { state: 'paused', stationId: 's' }), true);
+});
+
+test('an album, playlist or collection on air takes the station line (RL.11)', () => {
+  const list = { kind: 'album', id: 'al-1', name: 'Kind of Blue', artist: 'Miles Davis', index: 2, count: 5, place: 'Album · 3 of 5' };
+  const view = viewOf(entity('playing', { station_id: null, list }));
+  assert.deepEqual(view.list, { kind: 'album', name: 'Kind of Blue', index: 2, count: 5, shuffled: false });
+  assert.equal(listLine(view.list), 'Kind of Blue · Album · 3 of 5 · Stealth');
+  // A shuffled list says so (RL.6).
+  assert.equal(
+    listLine(viewOf(entity('playing', { station_id: null, list: { ...list, shuffled: true } })).list),
+    'Kind of Blue · Album · 3 of 5 · Shuffled · Stealth',
+  );
+  assert.equal(listLine({ kind: 'collection', name: 'Rain', index: 0, count: 1 }), 'Rain · Collection · 1 of 1 · Stealth');
+  // A station plays, or an older integration sends nothing: no list.
+  assert.equal(viewOf(entity()).list, null);
+  assert.equal(listOf({ ...list, kind: 'station' }), null);
+  assert.equal(listOf({ ...list, index: 5 }), null);
+  assert.equal(listOf({ ...list, index: '2' }), null);
+});
+
+test('short of height: a smaller cover, the why line before 160 px, then nothing below 120 (HA.3)', () => {
+  // The full card while playing on the wall iPad: 715 px, 421 of them besides the cover.
+  const full = { height: 715, art: 294, why: 42 };
+  assert.deepEqual(fitFull(800, full), { art: null, tight: false });
+  assert.deepEqual(fitFull(715, full), { art: null, tight: false });
+  assert.deepEqual(fitFull(600, full), { art: 179, tight: false });
+  assert.deepEqual(fitFull(560, full), { art: 181, tight: true });
+  assert.deepEqual(fitFull(500, full), { art: 121, tight: true });
+  assert.equal(fitFull(497, full), null);
+  // Losing the why line can give a smaller cover its whole width back.
+  assert.deepEqual(fitFull(570, { height: 600, art: 180, why: 42 }), { art: null, tight: true });
+  // Without a why line the cover shrinks to 120, then the full card no longer fits.
+  const noWhy = { height: 673, art: 294, why: 0 };
+  assert.deepEqual(fitFull(500, noWhy), { art: 121, tight: false });
+  assert.equal(fitFull(498, noWhy), null);
+  // A narrow card, whose cover is already under 160, keeps the why line until the cover would shrink.
+  assert.deepEqual(fitFull(600, { height: 600, art: 150, why: 42 }), { art: null, tight: false });
+  assert.deepEqual(fitFull(580, { height: 600, art: 150, why: 42 }), { art: null, tight: true });
+});
+
+test('fitting the screen: below its top, then compact, then the screen for a card you scroll to (HA.3)', () => {
+  const playing = { height: 715, art: 294, why: 42 };
+  const stopped = { height: 578, art: 294, why: 0 };
+  const compact = () => 254;
+  const unmeasured = () => assert.fail('the compact card is measured only when the full one fails');
+  // The wall iPad: 475 px under the card. Stopped, a 191 px cover; playing, compact, with the 475 px
+  // for its cover to grow into.
+  assert.deepEqual(chooseFit({ below: 475, screen: 682 }, stopped, unmeasured), {
+    compact: false,
+    art: 191,
+    tight: false,
+  });
+  assert.deepEqual(chooseFit({ below: 475, screen: 682 }, playing, compact), {
+    compact: true,
+    art: null,
+    tight: false,
+    available: 475,
+  });
+  // A card that starts too far down for even the compact card fits the screen you scroll it into.
+  assert.deepEqual(chooseFit({ below: 150, screen: 716 }, playing, compact), {
+    compact: false,
+    art: null,
+    tight: false,
+  });
+  assert.deepEqual(chooseFit({ below: -300, screen: 300 }, playing, compact).compact, true);
+  // Fixed rows: their height, never the screen.
+  assert.deepEqual(chooseFit({ box: 504 }, playing, unmeasured), { compact: false, art: 125, tight: true });
+  assert.deepEqual(chooseFit({ box: 248 }, playing, unmeasured), {
+    compact: true,
+    art: null,
+    tight: false,
+    available: 248,
+  });
+});
+
+test('the room kept free at the bottom: 72 px unless set (HA.3)', () => {
+  assert.equal(bottomOffset({}), 72);
+  assert.equal(bottomOffset({ bottom_offset: null }), 72);
+  assert.equal(bottomOffset({ bottom_offset: 0 }), 0);
+  assert.equal(bottomOffset({ bottom_offset: 120 }), 120);
+  assert.equal(bottomOffset({ bottom_offset: -8 }), 72);
+  assert.equal(bottomOffset({ bottom_offset: 'tall' }), 72);
 });

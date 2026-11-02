@@ -144,6 +144,12 @@
     "choose_station": {
       "message": "Choose a station first: pick one as the source, or play one from Media."
     },
+    "lists_unsupported": {
+      "message": "This radio can't play albums, playlists or collections. Update Lumae Radio."
+    },
+    "unknown_list": {
+      "message": "Choose an album, playlist or collection from Media."
+    },
     "unknown_station": {
       "message": "The radio has no station {station}."
     },

@@ -11,8 +11,9 @@ One install from HACS gives you both:
 - **The card** (`custom:lumae-radio-card`): served by the integration and loaded on every
   dashboard, so there is no separate resource to add.
 
-The radio plays its own stations; Home Assistant controls it like a remote. Radio listening is
-always Stealth: nothing here reaches your listening history, scrobbles or The Pulse.
+The radio plays its own stations, and an album, playlist or collection start to end; Home
+Assistant controls it like a remote. Radio listening is always Stealth: nothing here reaches
+your listening history, scrobbles or The Pulse.
 
 ## What you need
 
@@ -65,8 +66,18 @@ entity: media_player.lumae_radio
 |---|---|---|
 | `entity` | | The radio's media player. |
 | `theme` | `auto` | `auto` follows Home Assistant's light or dark mode; `dark` or `light` keeps one. |
+| `layout` | `auto` | `auto` keeps the whole card on screen (see below); `full` always shows the full card; `compact` puts a small cover beside the title and the controls. |
+| `bottom_offset` | `72` | With `layout: auto`, the room in px kept free under the card, so a bar along the bottom of the screen doesn't cover the controls. |
 | `show_volume` | `true` | Show the volume slider. |
 | `show_steering` | `true` | Show Favor · Less · Rest · Ban (needs the key's Stations scope). |
+
+With `layout: auto` the card fits the height it has. When the full card would run past the
+bottom of the screen (less `bottom_offset`), the cover gets smaller; the line under the title goes
+before the cover drops below 160 px; below 120 px the card turns compact, and its cover grows into
+the room left. It stays compact until the screen, its place or its width changes, so it doesn't
+switch as tracks start and stop. A card that starts too far down the page to fit there is one you
+scroll to, so it fits the screen instead. With fixed rows in a sections view
+(`grid_options: rows`), it fills and fits those rows instead.
 
 On the card:
 
@@ -79,6 +90,9 @@ On the card:
 - **The chips** under the volume favor, play less, rest for a week or ban the playing track on
   its station. Each change shows a note with **Undo** for a few seconds. Ban asks first, then
   skips the track.
+- While an album, playlist or collection plays, the line under the radio's name names it and
+  its place ("Kind of Blue · Album · 3 of 12"); a list has no station, so there is nothing to
+  steer.
 
 ## The media player
 
@@ -87,6 +101,21 @@ stations by name) and **media browsing** (the stations, to play one). Its attrib
 `radio_state` (`playing`, `paused`, `stopped`, `buffering` or `fault`), `station_id`,
 `station_mode`, `stations`, `standing` (the playing track's preference, rest and ban),
 `selection` (why the radio chose it) and `health`.
+
+A radio that plays albums, playlists and collections (it reports this itself; `plays_lists` is
+true) also offers:
+
+- **Media** with Stations, Albums (from the radio's library), Playlists (its music server
+  account's own and public ones) and Collections (from Lumae Analysis), 64 at a time with
+  **More** to go on, and **search** across stations and all three.
+- **Play** of an album, playlist or collection: it plays start to end in its own order, albums
+  gapless, then the station that was on (or a schedule's) returns. **Previous** goes back
+  within it, and **source** and `media_playlist` name it. The `list` attribute is
+  `{kind, id, name, artist, index, count, shuffled, place}`.
+- **Shuffle**, from a radio that shuffles lists: turned on, the next album, playlist or
+  collection you play plays in the Lumae app's Shuffle order, worked out once as it starts (the
+  card adds "Shuffled" to its line). It doesn't reorder a list already playing, and it's off
+  again after Home Assistant restarts.
 
 The radio pushes every change, so Home Assistant updates at once; it also checks every minute,
 and every 10 seconds while the push connection is down.
@@ -126,6 +155,18 @@ target:
 data:
   media_content_id: station:<station id>
   media_content_type: station
+```
+
+Play an album by the music server's album ID (a playlist or collection the same way, with
+`playlist` or `collection`):
+
+```yaml
+action: media_player.play_media
+target:
+  entity_id: media_player.lumae_radio
+data:
+  media_content_id: album:<album id>
+  media_content_type: album
 ```
 
 ## Troubleshooting

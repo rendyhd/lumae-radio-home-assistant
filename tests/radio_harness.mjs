@@ -7,7 +7,9 @@
  *
  * Prints one JSON line ({port, origins, fingerprint, keys}) once it listens, then takes commands
  * on stdin, one per line: `advance`, `state <playing|paused|stopped|buffering|fault> [code]`,
- * `revoke <key name>`, `rest-ban-clear`. Uses the public synthetic test certificate only.
+ * `revoke <key name>`, `rest-ban-clear`, `lists <on|off>` (a radio that plays albums, playlists
+ * and collections, RL.3, or an older one: the default), `collections <on|off>`. Uses the public
+ * synthetic test certificate only.
  */
 
 import { X509Certificate } from 'node:crypto';
@@ -97,6 +99,69 @@ const stations = [
 let deviceRevision = 41;
 let stationsRevision = 5;
 let volume = 0.62;
+
+// Albums, playlists and collections (RL.11): 70 albums so Media pages them, as the radio's
+// catalogue does (albums by ID, playlists and collections by name, `limit` at a time).
+let playsLists = false;
+let collectionsOn = true;
+const LIBRARY = {
+  album: [
+    { id: 'al-000-blue', title: 'Kind of Blue', artist: 'Miles Davis' },
+    ...Array.from({ length: 69 }, (_, i) => ({
+      id: `al-${String(i + 1).padStart(3, '0')}`,
+      title: `Record ${i + 1}`,
+      artist: 'Band',
+    })),
+  ],
+  playlist: [
+    { id: 'pl-rain', title: 'Rainy days', songs: 3 },
+    { id: 'pl-run', title: 'Running', songs: null },
+  ],
+  collection: [{ id: 'col-rain', title: 'Rain', albums: 1, songs: 2 }],
+};
+// The list on air, as `playback.list` names it; null while a station plays.
+let onAir = null;
+const LIST_ID = '6c3a8a52-61a9-4f43-bb53-1d6a1c2d9a10';
+
+function catalogue({ q = '', kind, cursor = '', limit = '32' }) {
+  if (!LIBRARY[kind]) fail('invalid-search');
+  if (kind === 'collection' && !collectionsOn) fail('collections-off');
+  const needle = q.toLowerCase();
+  const matching = LIBRARY[kind].filter((item) => item.title.toLowerCase().includes(needle));
+  const size = Number(limit);
+  if (kind === 'album') {
+    const page = matching.filter((item) => item.id > cursor).slice(0, size);
+    return {
+      items: page.map((item) => ({ kind, ...item })),
+      nextCursor: page.length === size ? page.at(-1).id : null,
+    };
+  }
+  const from = Number(cursor || 0);
+  const page = matching.slice(from, from + size);
+  return {
+    items: page.map((item) => ({ kind, ...item })),
+    nextCursor: from + size < matching.length ? String(from + size) : null,
+  };
+}
+
+const findList = (list) =>
+  LIBRARY[list.kind]?.find((item) => item.id === list.id) ?? fail(`${list.kind}-not-found`);
+
+function playList(list, order) {
+  const found = findList(list);
+  onAir = {
+    listId: LIST_ID,
+    kind: list.kind,
+    id: list.id,
+    name: found.title,
+    artist: found.artist ?? null,
+    order: order ?? 'in-order',
+    index: 0,
+    count: 3,
+    returnStationId: playback.stationId,
+  };
+  playback.stationId = null;
+}
 const playback = {
   state: 'playing',
   stationId: 'stn-morning',
@@ -151,9 +216,11 @@ function statusDto() {
       remaining: track ? 3 : 0,
       positionMs: position(),
       durationMs: track?.durationMs ?? null,
-      selection: track
+      // A list plays without the station's programmer: no explanation (RL.3).
+      selection: track && !onAir
         ? { preparationId: 'prep-1', definitionRevision: '3', policyVersion: 'v2', fit: 0.87, priorRadioPlays: 4, priorRestMs: 3 * 3_600_000 + 120_000, energyTarget: 0.55, trackEnergy: 0.61, scarcityTier: 'preferred', stealth: true }
         : null,
+      ...(playsLists ? { list: onAir, ended: null } : {}),
       fadeIn: null,
       next: track ? { id: TRACKS[(playback.index + 1) % TRACKS.length].id, artworkId: TRACKS[(playback.index + 1) % TRACKS.length].id } : null,
     },
@@ -168,6 +235,7 @@ function statusDto() {
       deviceQualified: false,
     },
     volume,
+    ...(playsLists ? { features: ['lists', 'list-shuffle'] } : {}),
     sonic: { dimensions: 'sonic-dimensions-v3', calibration: 'v1' },
     stealth: true,
   };
@@ -201,7 +269,7 @@ function accept(principal, idempotencyKey, apply) {
 }
 
 const application = {
-  async read({ resource, id }) {
+  async read({ resource, id, query }) {
     if (resource === 'status') return { data: statusDto(), revision: String(deviceRevision) };
     if (resource === 'stations' && !id)
       return { data: { stations: stations.map((entry) => ({ ...stationDto(entry), bans: entry.bans.map((trackId) => ({ trackId })) })) }, revision: `stations-${stationsRevision}` };
@@ -212,6 +280,7 @@ const application = {
         revision: entry.revision,
       };
     }
+    if (resource === 'catalogue' && playsLists) return { data: catalogue(query), revision: null };
     if (resource === 'operations') {
       const operation = operations.get(id) ?? fail('operation-not-found');
       const { owner: _owner, ...dto } = operation;
@@ -229,9 +298,25 @@ const application = {
       const command = body.action;
       if (command === 'pause' && !['playing', 'buffering'].includes(playback.state)) fail('invalid-playback-state');
       if (command === 'resume' && playback.state !== 'paused') fail('invalid-playback-state');
-      if (command === 'play') station(body.stationId);
+      if (command === 'play' && body.list) {
+        if (!playsLists || ![undefined, 'in-order', 'shuffle'].includes(body.order)) fail('invalid-input');
+        findList(body.list);
+      } else if (command === 'play') station(body.stationId);
+      if (['previous', 'jump'].includes(command) && !onAir) fail('invalid-playback-state');
       return accept(principal, idempotencyKey, () => {
-        if (command === 'play') {
+        if (command === 'play' && body.list) {
+          playList(body.list, body.order);
+          playback.state = 'playing';
+          playback.fault = null;
+          startTrack(0);
+        } else if (command === 'previous') {
+          onAir.index = Math.max(0, onAir.index - 1);
+          startTrack(onAir.index);
+        } else if (command === 'jump') {
+          onAir.index = body.index;
+          startTrack(onAir.index);
+        } else if (command === 'play') {
+          onAir = null;
           playback.stationId = body.stationId;
           playback.state = 'playing';
           playback.fault = null;
@@ -248,6 +333,7 @@ const application = {
           playback.heldAt = null;
         } else if (command === 'skip') {
           if (playback.state === 'stopped') fail('no-active-queue');
+          if (onAir) onAir.index = Math.min(onAir.count - 1, onAir.index + 1);
           startTrack(playback.index + 1);
         } else if (command === 'volume') {
           volume = body.volume;
@@ -398,6 +484,10 @@ lines.on('line', (line) => {
   } else if (command === 'revoke') {
     const keyId = keys[rest[0]].split('.')[1];
     authStore.revokeApiKey({ sessionToken: owner.sessionToken, csrfToken: owner.csrfToken, keyId });
+  } else if (command === 'lists') {
+    playsLists = rest[0] === 'on';
+  } else if (command === 'collections') {
+    collectionsOn = rest[0] === 'on';
   } else if (command === 'stations') {
     stations[1].name = rest.join(' ') || stations[1].name;
     stationsRevision += 1;

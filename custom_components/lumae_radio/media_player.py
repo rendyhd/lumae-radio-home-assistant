@@ -1,7 +1,8 @@
-"""The radio as a media player: what is on air, transport, volume and stations.
+"""The radio as a media player: what is on air, transport, volume, stations and lists.
 
-The radio plays its own stations; Home Assistant controls it like the Lumae app's remote does.
-Nothing here enters personal listening history: radio listening is always Stealth.
+The radio plays its own stations, and (from RL.3) an album, playlist or collection start to end;
+Home Assistant controls it like the Lumae app's remote does. Nothing here enters personal
+listening history: radio listening is always Stealth.
 """
 
 from __future__ import annotations
@@ -17,6 +18,9 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    SearchError,
+    SearchMedia,
+    SearchMediaQuery,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
@@ -33,6 +37,7 @@ from .const import (
     ATTR_REST_UNTIL,
     CONF_ORIGIN,
     DOMAIN,
+    MEDIA_TYPE_COLLECTION,
     MEDIA_TYPE_STATION,
     SCOPE_STATIONS,
     SERVICE_STEER_TRACK,
@@ -62,6 +67,31 @@ FEATURES = (
     | MediaPlayerEntityFeature.PLAY_MEDIA
     | MediaPlayerEntityFeature.BROWSE_MEDIA
 )
+
+# Media's folders for a radio that plays lists, each read from the radio a page at a time.
+LIST_FOLDERS: dict[str, str] = {
+    "albums": "album",
+    "playlists": "playlist",
+    "collections": "collection",
+}
+FOLDER_TITLES: dict[str, str] = {
+    "stations": "Stations",
+    "albums": "Albums",
+    "playlists": "Playlists",
+    "collections": "Collections",
+}
+LIST_CLASSES: dict[str, MediaClass] = {
+    "album": MediaClass.ALBUM,
+    "playlist": MediaClass.PLAYLIST,
+    "collection": MediaClass.PLAYLIST,
+}
+LIST_TYPES: dict[str, str] = {
+    "album": MediaType.ALBUM,
+    "playlist": MediaType.PLAYLIST,
+    "collection": MEDIA_TYPE_COLLECTION,
+}
+BROWSE_PAGE = 64
+SEARCH_LIMIT = 20
 
 STEER_SCHEMA = cv.make_entity_service_schema(
     {
@@ -93,11 +123,11 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
     _attr_translation_key = "radio"
     _attr_media_content_type = MediaType.MUSIC
     _attr_media_image_remotely_accessible = False
-    _attr_supported_features = FEATURES
     # The card's working data changes with every track; history keeps only what played.
     _unrecorded_attributes = frozenset(
         {
             "stations",
+            "list",
             "standing",
             "selection",
             "health",
@@ -110,6 +140,8 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
     def __init__(self, coordinator: LumaeRadioCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.config_entry.unique_id
+        # Whether the next album, playlist or collection played is shuffled (RL.6).
+        self._shuffle_lists = False
 
     @property
     def _status(self) -> dict[str, Any]:
@@ -125,6 +157,27 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         if data is None:
             return None
         return model.find_station(data.stations, model.station_id(self._status))
+
+    @property
+    def _list(self) -> dict[str, Any] | None:
+        return model.list_on_air(self._status)
+
+    @property
+    def supported_features(self) -> MediaPlayerEntityFeature:
+        features = FEATURES
+        # Search finds albums, playlists and collections; Previous goes back within a list.
+        if model.plays_lists(self._status):
+            features |= MediaPlayerEntityFeature.SEARCH_MEDIA
+        if self._list is not None:
+            features |= MediaPlayerEntityFeature.PREVIOUS_TRACK
+        # Shuffle is for the next album, playlist or collection played (RL.6).
+        if model.shuffles_lists(self._status):
+            features |= MediaPlayerEntityFeature.SHUFFLE_SET
+        return features
+
+    @property
+    def shuffle(self) -> bool | None:
+        return self._shuffle_lists if model.shuffles_lists(self._status) else None
 
     @property
     def state(self) -> MediaPlayerState | None:
@@ -181,7 +234,14 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         return model.volume(self._status)
 
     @property
+    def media_playlist(self) -> str | None:
+        return self._list["name"] if self._list else None
+
+    @property
     def source(self) -> str | None:
+        # A list plays instead of a station: its name, as on the Lumae app's remote.
+        if self._list:
+            return self._list["name"]
         return self._station.get("name") if self._station else None
 
     @property
@@ -198,9 +258,12 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         status = self._status
         track = self._track
         station = self._station
+        on_air = self._list
         return {
             "radio_state": model.playback_state(status),
             "station_id": model.station_id(status),
+            "plays_lists": model.plays_lists(status),
+            "list": {**on_air, "place": model.list_place(on_air)} if on_air else None,
             "station_mode": model.energy_mode(station) if station else None,
             "track_id": track["id"] if track else None,
             "stations": model.station_summaries(self.coordinator.data.stations)
@@ -247,6 +310,15 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
     async def async_media_next_track(self) -> None:
         await self.coordinator.async_command("skip")
 
+    async def async_media_previous_track(self) -> None:
+        # Within a list: the song's start after 15 seconds, else the song before.
+        await self.coordinator.async_command("previous")
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        # The radio works a shuffled order out once at Play, so this is for the next list.
+        self._shuffle_lists = shuffle
+        self.async_write_ha_state()
+
     async def async_set_volume_level(self, volume: float) -> None:
         await self.coordinator.async_command(
             "volume", volume=round(min(1, max(0, volume)), 2)
@@ -270,6 +342,19 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
     async def async_play_media(
         self, media_type: MediaType | str, media_id: str, **kwargs: Any
     ) -> None:
+        if (chosen := _list_media(media_type, media_id)) is not None:
+            if not model.plays_lists(self._status):
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="lists_unsupported"
+                )
+            kind, identifier = chosen
+            shuffled = self._shuffle_lists and model.shuffles_lists(self._status)
+            await self.coordinator.async_command(
+                "play",
+                list={"kind": kind, "id": identifier},
+                **({"order": "shuffle"} if shuffled else {}),
+            )
+            return
         station_id = media_id.removeprefix(STATION_PREFIX)
         if model.find_station(self.coordinator.data.stations, station_id) is None:
             raise ServiceValidationError(
@@ -284,8 +369,28 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         media_content_type: MediaType | str | None = None,
         media_content_id: str | None = None,
     ) -> BrowseMedia:
-        if media_content_id not in (None, "", "stations"):
-            raise BrowseError(f"Unknown item: {media_content_id}")
+        lists = model.plays_lists(self._status)
+        # A radio that plays lists opens on its folders; an older one on its stations.
+        if lists and media_content_id in (None, "", "root"):
+            return BrowseMedia(
+                media_class=MediaClass.DIRECTORY,
+                media_content_id="root",
+                media_content_type="root",
+                title=self.coordinator.config_entry.title,
+                can_play=False,
+                can_expand=True,
+                can_search=True,
+                children_media_class=MediaClass.DIRECTORY,
+                children=[_folder(folder) for folder in FOLDER_TITLES],
+            )
+        if media_content_id in (None, "", "stations"):
+            return self._browse_stations(searchable=lists)
+        folder, _, cursor = (media_content_id or "").partition(":")
+        if lists and folder in LIST_FOLDERS:
+            return await self._browse_lists(folder, cursor or None)
+        raise BrowseError(f"Unknown item: {media_content_id}")
+
+    def _browse_stations(self, *, searchable: bool) -> BrowseMedia:
         stations = model.station_summaries(self.coordinator.data.stations)
         return BrowseMedia(
             media_class=MediaClass.DIRECTORY,
@@ -294,19 +399,78 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
             title="Stations",
             can_play=False,
             can_expand=True,
+            can_search=searchable,
             children_media_class=MediaClass.CHANNEL,
-            children=[
-                BrowseMedia(
-                    media_class=MediaClass.CHANNEL,
-                    media_content_id=f"{STATION_PREFIX}{station['id']}",
-                    media_content_type=MEDIA_TYPE_STATION,
-                    title=station["name"],
-                    can_play=True,
-                    can_expand=False,
-                )
-                for station in stations
-            ],
+            children=[_station_media(station) for station in stations],
         )
+
+    async def _browse_lists(self, folder: str, cursor: str | None) -> BrowseMedia:
+        """One page of the radio's albums, playlists or collections, then More."""
+        kind = LIST_FOLDERS[folder]
+        try:
+            data = await self.coordinator.client.catalogue(
+                kind, cursor=cursor, limit=BROWSE_PAGE
+            )
+        except RadioError as err:
+            raise BrowseError(model.refusal_text(err.code)) from err
+        items, next_cursor = model.catalogue_page(data, kind)
+        children = [_list_item(kind, item) for item in items]
+        if next_cursor:
+            children.append(
+                BrowseMedia(
+                    media_class=MediaClass.DIRECTORY,
+                    media_content_id=f"{folder}:{next_cursor}",
+                    media_content_type=folder,
+                    title=f"More {FOLDER_TITLES[folder].lower()}",
+                    can_play=False,
+                    can_expand=True,
+                )
+            )
+        return BrowseMedia(
+            media_class=MediaClass.DIRECTORY,
+            media_content_id=f"{folder}:{cursor}" if cursor else folder,
+            media_content_type=folder,
+            title=FOLDER_TITLES[folder],
+            can_play=False,
+            can_expand=True,
+            can_search=True,
+            children_media_class=LIST_CLASSES[kind],
+            children=children,
+        )
+
+    async def async_search_media(self, query: SearchMediaQuery) -> SearchMedia:
+        """Stations by name, and the radio's albums, playlists and collections."""
+        if not model.plays_lists(self._status):
+            raise SearchError(
+                "Update Lumae Radio to search its albums, playlists and collections."
+            )
+        text = query.search_query.strip()
+        if not text:
+            return SearchMedia(result=[])
+        kinds, stations = _search_targets(query)
+        result: list[BrowseMedia] = []
+        if stations:
+            needle = text.casefold()
+            result.extend(
+                _station_media(station)
+                for station in model.station_summaries(self.coordinator.data.stations)
+                if needle in station["name"].casefold()
+            )
+        failures: list[RadioError] = []
+        for kind in kinds:
+            try:
+                data = await self.coordinator.client.catalogue(
+                    kind, text, limit=SEARCH_LIMIT
+                )
+            except RadioError as err:
+                # Collections switched off, say, still leave albums and playlists to find.
+                failures.append(err)
+                continue
+            items, _ = model.catalogue_page(data, kind)
+            result.extend(_list_item(kind, item) for item in items)
+        if kinds and len(failures) == len(kinds) and not result:
+            raise SearchError(model.refusal_text(failures[0].code))
+        return SearchMedia(result=result)
 
     # ── Steering the playing track ───────────────────────────────────────
 
@@ -319,3 +483,81 @@ class LumaeRadioPlayer(LumaeRadioEntity, MediaPlayerEntity):
         await self.coordinator.async_steer(
             choice, rest_days=rest_days, rest_until=rest_until
         )
+
+
+def _folder(folder: str) -> BrowseMedia:
+    # Only a radio that plays lists has folders, and it searches each one.
+    return BrowseMedia(
+        media_class=MediaClass.DIRECTORY,
+        media_content_id=folder,
+        media_content_type=folder,
+        title=FOLDER_TITLES[folder],
+        can_play=False,
+        can_expand=True,
+        can_search=True,
+    )
+
+
+def _station_media(station: dict[str, Any]) -> BrowseMedia:
+    return BrowseMedia(
+        media_class=MediaClass.CHANNEL,
+        media_content_id=f"{STATION_PREFIX}{station['id']}",
+        media_content_type=MEDIA_TYPE_STATION,
+        title=station["name"],
+        can_play=True,
+        can_expand=False,
+    )
+
+
+def _list_item(kind: str, item: dict[str, Any]) -> BrowseMedia:
+    return BrowseMedia(
+        media_class=LIST_CLASSES[kind],
+        media_content_id=f"{kind}:{item['id']}",
+        media_content_type=LIST_TYPES[kind],
+        title=model.catalogue_title(kind, item),
+        can_play=True,
+        can_expand=False,
+    )
+
+
+def _list_media(media_type: MediaType | str, media_id: str) -> tuple[str, str] | None:
+    """An album, playlist or collection to play: `album:<id>`, or the kind as the type.
+
+    None for a station. An empty ID is no list at all.
+    """
+    for kind in model.LIST_KINDS:
+        identifier = (
+            media_id.removeprefix(f"{kind}:")
+            if media_id.startswith(f"{kind}:")
+            else None
+        )
+        if identifier is None and str(media_type) == LIST_TYPES[kind]:
+            identifier = media_id
+        if identifier is not None:
+            if not identifier:
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN, translation_key="unknown_list"
+                )
+            return kind, identifier
+    return None
+
+
+def _search_targets(query: SearchMediaQuery) -> tuple[list[str], bool]:
+    """Which lists to search, and whether stations too.
+
+    From the folder searched in Media (its content type), else the query's type or classes.
+    """
+    content_type = str(query.media_content_type) if query.media_content_type else None
+    if content_type in LIST_FOLDERS:
+        return [LIST_FOLDERS[content_type]], False
+    if content_type in (MEDIA_TYPE_STATION, "stations"):
+        return [], True
+    if content_type in LIST_TYPES.values():
+        return [
+            kind for kind, value in LIST_TYPES.items() if value == content_type
+        ], False
+    classes = set(query.media_filter_classes or [])
+    if not classes:
+        return list(model.LIST_KINDS), True
+    kinds = [kind for kind in model.LIST_KINDS if LIST_CLASSES[kind] in classes]
+    return kinds, MediaClass.CHANNEL in classes

@@ -217,6 +217,20 @@ REFUSALS: dict[str, str] = {
     "read-limit": "The radio is busy. Try again in a moment.",
     "service-shutdown": "The radio restarted before it finished. Try again.",
     "cancelled": "Canceled. The radio keeps what it had before.",
+    "unreachable": "Couldn’t reach the radio. It keeps playing on its own; try again in a moment.",
+    # Albums, playlists and collections (RL.11). The radio reads them with its own accounts.
+    "album-not-found": "The radio’s music server account doesn’t have this album.",
+    "playlist-not-found": "The radio’s music server account can’t see this playlist. Share it with that account on your music server.",
+    "collection-not-found": "The radio doesn’t have this collection. It sees collections once they’ve synced, for the AudioMuse-AI user it signs in as.",
+    "no-playable-songs": "None of its songs are in the radio’s library, so it can’t play there.",
+    "lists-unavailable": "The radio can’t play albums, playlists or collections right now. Restart it, then try again.",
+    "shuffle-unavailable": "The radio can’t shuffle a list yet. Play it in order.",
+    "music-server-unreachable": "The radio can’t reach your music server. Try again when it’s back.",
+    "playlists-unreachable": "Your music server couldn’t be reached to read playlists.",
+    "collections-unreachable": "AudioMuse-AI couldn’t be reached to read your collections.",
+    "collections-off": "Turn on Living Collections in Lumae Analysis to use your collections.",
+    "collections-disabled": "Turn on Living Collections in Lumae Analysis to use your collections.",
+    "collections-unsupported": "Update Lumae Analysis to use your collections on the radio.",
 }
 
 
@@ -232,3 +246,109 @@ def main_command(status: dict[str, Any]) -> str | None:
     if state == "paused":
         return "resume"
     return "play" if station_id(status) else None
+
+
+# ── Albums, playlists and collections (RL.11) ────────────────────────────
+
+LIST_KINDS: tuple[str, ...] = ("album", "playlist", "collection")
+LIST_KIND_LABELS: dict[str, str] = {
+    "album": "Album",
+    "playlist": "Playlist",
+    "collection": "Collection",
+}
+# Every name the radio's catalogue names its lists by when they have none.
+UNTITLED_LISTS: dict[str, str] = {
+    "album": "Untitled album",
+    "playlist": "Untitled playlist",
+    "collection": "Untitled collection",
+}
+
+
+def _count(value: Any) -> int | None:
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        else None
+    )
+
+
+def plays_lists(status: dict[str, Any]) -> bool:
+    """Whether this radio plays an album, playlist or collection (`features` has `lists`)."""
+    features = status.get("features")
+    return isinstance(features, list) and "lists" in features
+
+
+def shuffles_lists(status: dict[str, Any]) -> bool:
+    """Whether this radio shuffles a list as the Lumae app does (`features` has `list-shuffle`)."""
+    features = status.get("features")
+    return isinstance(features, list) and "list-shuffle" in features
+
+
+def list_on_air(status: dict[str, Any]) -> dict[str, Any] | None:
+    """The album, playlist or collection the radio plays instead of a station, if any.
+
+    Only from a radio that says it plays lists; `index` is the playing song's place among the
+    `count` songs it saved, from 0.
+    """
+    if not plays_lists(status):
+        return None
+    value = _dict(playback(status).get("list"))
+    kind = value.get("kind")
+    index = _count(value.get("index"))
+    count = _count(value.get("count"))
+    if (
+        kind not in LIST_KINDS
+        or _text(value.get("id")) is None
+        or index is None
+        or count is None
+        or index >= count
+    ):
+        return None
+    return {
+        "kind": kind,
+        "id": value["id"],
+        "name": _text(value.get("name")) or UNTITLED_LISTS[kind],
+        "artist": _text(value.get("artist")),
+        "index": index,
+        "count": count,
+        "shuffled": value.get("order") == "shuffle",
+    }
+
+
+def list_place(on_air: dict[str, Any]) -> str:
+    """The list's place, "Album · 3 of 12", as the Lumae app's remote says it."""
+    return f"{LIST_KIND_LABELS[on_air['kind']]} · {on_air['index'] + 1} of {on_air['count']}"
+
+
+def catalogue_page(data: Any, kind: str) -> tuple[list[dict[str, Any]], str | None]:
+    """A page of the radio's albums, playlists or collections, and the next page's cursor."""
+    body = _dict(data)
+    items = []
+    for item in body.get("items") or []:
+        if not isinstance(item, dict) or item.get("kind") != kind:
+            continue
+        identifier = _text(item.get("id"))
+        if identifier is None:
+            continue
+        title = _text(item.get("title"))
+        items.append(
+            {
+                "id": identifier,
+                # The radio names an album without one by its ID; never shown.
+                "title": title
+                if title and title != identifier
+                else UNTITLED_LISTS[kind],
+                "artist": _text(item.get("artist")),
+                "songs": _count(item.get("songs")),
+                "albums": _count(item.get("albums")),
+            }
+        )
+    cursor = _text(body.get("nextCursor"))
+    return items, cursor
+
+
+def catalogue_title(kind: str, item: dict[str, Any]) -> str:
+    """How Media names an album (with its artist), a playlist or a collection."""
+    if kind == "album" and item.get("artist"):
+        return f"{item['title']} · {item['artist']}"
+    return item["title"]
